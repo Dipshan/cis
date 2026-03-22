@@ -1,0 +1,299 @@
+#!/bin/bash
+# CIS - Collaborative Interactive Shell
+# Authors:
+# Anuska Bhattarai (800832698) - anuskbh@siue.edu
+# Deepshan Adhikari (800846035) - deepadh@siue.edu
+# Sumit Shrestha (800835513) - sumishr@siue.edu
+
+CONFIG_DIR="$HOME/cis"
+
+show_usage() {
+    echo "╔════════════════════════════════════════════════════════════╗"
+    echo "║         CIS - Collaborative Interactive Shell              ║"
+    echo "╚════════════════════════════════════════════════════════════╝"
+    echo ""
+    echo "OUT-OF-BAND COMMANDS:"
+    echo "  cis host <session>                    - Start a new session"
+    echo "  cis join <host_username> <session>    - Join existing session"
+    echo "  cis list <host_username>              - List active sessions"
+    echo "  cis request <host_username> <session> - Request control (from outside)"
+    echo "  cis end <session>                     - End your session"
+    echo ""
+    echo "IN-SESSION COMMANDS (inside tmux session, press Ctrl+P THEN key):"
+    echo "  d - request    1 - release    w - who"
+    echo "  m - message    g - grant      k - kick"
+}
+
+if ! command -v tmux &> /dev/null; then
+    echo "ERROR: tmux is not installed"
+    echo "Please install tmux first:"
+    echo "  Ubuntu/Debian: sudo apt install tmux"
+    echo "  MacOS: brew install tmux"
+    exit 1
+fi
+
+case "$1" in
+    host)
+        SESSION="$2"
+        if [ -z "$SESSION" ]; then
+            echo "ERROR: Please specify session name"
+            echo "Example: cis host demo-session"
+            exit 1
+        fi
+        
+        # === SECURITY FIX: Allow secure pass-through to shared folder ===
+        chmod 711 "$HOME" 2>/dev/null
+        chmod 711 "$HOME/cis" 2>/dev/null
+        
+        STATE_DIR="$HOME/cis/trace/sessions/$SESSION"
+        mkdir -p "$STATE_DIR"
+        chmod 777 "$HOME/cis/trace" "$HOME/cis/trace/sessions" "$STATE_DIR" 2>/dev/null
+        
+        SOCKET="$STATE_DIR/tmux.sock"
+        CURRENT_TTY=$(tty | sed 's/\//_/g')
+        
+        echo "host" > "$STATE_DIR/role.$CURRENT_TTY"
+        echo "$USER" > "$STATE_DIR/user.$CURRENT_TTY"
+        echo "$CURRENT_TTY" > "$STATE_DIR/host_tty"
+        touch "$STATE_DIR/queue"
+        echo "$CURRENT_TTY" > "$STATE_DIR/controller"
+        
+        # Session start log
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - SESSION START: Session $SESSION created by Host $USER" >> "$STATE_DIR/session.log"
+        
+        chmod 777 "$STATE_DIR/"* 2>/dev/null
+
+        clear
+        echo "╔════════════════════════════════════════════════════════════╗"
+        echo "║         CIS SESSION STARTED                                ║"
+        echo "╚════════════════════════════════════════════════════════════╝"
+        echo "Session name: $SESSION"
+        echo "Your role: HOST and CONTROLLER"
+        echo ""
+        echo "Others can join with: cis join $USER $SESSION"
+        echo ""
+        read -p "Press [Enter] to start the tmux session..."
+        
+        tmux -S "$SOCKET" -f "$CONFIG_DIR/etc/collaborative-tmux.conf" new-session -d -s "$SESSION"
+        chmod 777 "$SOCKET"
+        tmux -S "$SOCKET" attach-session -t "$SESSION"
+        ;;
+
+    join)
+        HOST_USER="$2"
+        SESSION="$3"
+        if [ -z "$SESSION" ]; then
+            echo "ERROR: Usage: cis join <host_username> <session_name>"
+            exit 1
+        fi
+        
+        # Look inside the Host's home directory
+        HOST_HOME=$(eval echo ~$HOST_USER)
+        STATE_DIR="$HOST_HOME/cis/trace/sessions/$SESSION"
+        SOCKET="$STATE_DIR/tmux.sock"
+        
+        if ! tmux -S "$SOCKET" has-session -t "$SESSION" 2>/dev/null; then
+            echo "ERROR: Session '$SESSION' does not exist"
+            exit 1
+        fi
+        
+        CURRENT_TTY=$(tty | sed 's/\//_/g')
+        
+        while true; do
+            mkdir -p "$STATE_DIR"
+            echo "observer" > "$STATE_DIR/role.$CURRENT_TTY"
+            echo "$USER" > "$STATE_DIR/user.$CURRENT_TTY"
+            
+            # Join log
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - JOIN: User $USER joined session as observer" >> "$STATE_DIR/session.log"
+            
+            chmod 666 "$STATE_DIR/role.$CURRENT_TTY" "$STATE_DIR/user.$CURRENT_TTY" 2>/dev/null
+            
+            tmux -S "$SOCKET" -f "$CONFIG_DIR/etc/collaborative-tmux.conf" attach-session -r -t "$SESSION"
+            
+            if ! tmux -S "$SOCKET" has-session -t "$SESSION" 2>/dev/null; then
+                echo -e "\nThe session has been ended by the Host."
+                exit 0
+            fi
+            
+            if [ -f "$STATE_DIR/kicked.$CURRENT_TTY" ]; then
+                clear
+                echo "You have been kicked from the session by the Host."
+                rm -f "$STATE_DIR/kicked.$CURRENT_TTY" 2>/dev/null
+                exit 0
+            fi
+            
+            clear
+            echo "╔════════════════════════════════════════════════════════════╗"
+            echo "║                 CIS - OBSERVER MENU                        ║"
+            echo "╚════════════════════════════════════════════════════════════╝"
+            echo "  1) Request Control"
+            echo "  2) Return to Session (Read-Only)"
+            echo "  3) Leave Session Completely"
+            echo ""
+            
+            (
+                while true; do
+                    if ! tmux -S "$SOCKET" has-session -t "$SESSION" 2>/dev/null; then
+                        echo -e "\n\nThe session was ended by the Host."
+                        kill -9 $$ 2>/dev/null
+                        exit 0
+                    fi
+                    if [ -f "$STATE_DIR/kicked.$CURRENT_TTY" ]; then
+                        echo -e "\n\nYou have been kicked from the session by the Host."
+                        rm -f "$STATE_DIR/kicked.$CURRENT_TTY" 2>/dev/null
+                        kill -9 $$ 2>/dev/null
+                        exit 0
+                    fi
+                    sleep 1
+                done
+            ) &
+            WATCHER_PID=$!
+            
+            while true; do
+                read -p "Choose an option (1-3): " choice
+                
+                # Validate input: only 1, 2, or 3 allowed
+                if [[ "$choice" =~ ^[1-3]$ ]]; then
+                    break
+                else
+                    echo "Please enter 1, 2, or 3."
+                fi
+            done
+            
+            kill -9 $WATCHER_PID 2>/dev/null
+            wait $WATCHER_PID 2>/dev/null
+            
+            case "$choice" in
+            1)
+                # Check if queue is empty
+                if [ ! -s "$STATE_DIR/queue" ]; then
+                    # First in queue - start 30s timer
+                    TIMESTAMP=$(date +%s)
+                    echo "$TIMESTAMP:$CURRENT_TTY" >> "$STATE_DIR/queue"
+                    echo -e "\nYou are first in queue."
+                    
+                    # Background timer check for front of queue
+                    (
+                        sleep 30
+                        # Check if still in queue
+                        if grep -q "$CURRENT_TTY" "$STATE_DIR/queue" 2>/dev/null; then
+                            # Check if this user became controller
+                            CURRENT_CONTROLLER=$(cat "$STATE_DIR/controller" 2>/dev/null)
+                            if [ "$CURRENT_CONTROLLER" != "$CURRENT_TTY" ]; then
+                                # Still in queue and not controller - remove and notify
+                                sed -i '' "/$CURRENT_TTY/d" "$STATE_DIR/queue" 2>/dev/null
+                                echo -e "\nYour request expired (30s timeout at front of queue)"
+                            fi
+                        fi
+                    ) &
+                else
+                    # Not first in queue - just add to end, no timer yet
+                    TIMESTAMP=$(date +%s)
+                    echo "$TIMESTAMP:$CURRENT_TTY" >> "$STATE_DIR/queue"
+                    POSITION=$(wc -l < "$STATE_DIR/queue" | tr -d ' ')
+                    echo -e "\nYou are position $POSITION in queue. You will get 30 seconds when you reach the front."
+                fi
+                
+                # Get position for notification
+                POSITION=$(grep -n "$CURRENT_TTY" "$STATE_DIR/queue" | cut -d: -f1)
+                
+                # Notify host
+                HOST_TTY=$(cat "$STATE_DIR/host_tty" 2>/dev/null)
+                if [ -n "$HOST_TTY" ]; then
+                    REAL_HOST=$(echo "$HOST_TTY" | sed 's|_|/|g')
+                    tmux -S "$SOCKET" send-keys -t "$REAL_HOST" "echo 'REQUEST: $USER (position $POSITION)'" Enter
+                fi
+                
+                sleep 2
+                ;;
+                2|"")
+                    ;;
+                3|*)
+                    # Leave session
+                    echo "$(date '+%Y-%m-%d %H:%M:%S') - LEAVE: User $USER left session voluntarily" >> "$STATE_DIR/session.log"
+                    rm -f "$STATE_DIR/role.$CURRENT_TTY" "$STATE_DIR/user.$CURRENT_TTY" 2>/dev/null
+                    echo "Disconnected from CIS."
+                    exit 0
+                    ;;
+            esac
+        done
+        ;;
+
+    list)
+        HOST_USER="$2"
+        if [ -z "$HOST_USER" ]; then
+            echo "ERROR: Usage: cis list <host_username>"
+            exit 1
+        fi
+        HOST_HOME=$(eval echo ~$HOST_USER)
+        ls "$HOST_HOME/cis/trace/sessions" 2>/dev/null || echo "No active sessions"
+        ;;
+
+    request)
+        HOST_USER="$2"
+        SESSION="$3"
+        if [ -z "$SESSION" ]; then
+            echo "ERROR: Usage: cis request <host_username> <session_name>"
+            exit 1
+        fi
+        
+        HOST_HOME=$(eval echo ~$HOST_USER)
+        STATE_DIR="$HOST_HOME/cis/trace/sessions/$SESSION"
+        SOCKET="$STATE_DIR/tmux.sock"
+        
+        # 1. Find the User's exact TTY
+        TARGET_TTY=""
+        for user_file in "$STATE_DIR"/user.*; do
+            if [ -f "$user_file" ] && [ "$(cat "$user_file")" = "$USER" ]; then
+                TARGET_TTY=$(basename "$user_file" | cut -d. -f2)
+                break
+            fi
+        done
+
+        if [ -z "$TARGET_TTY" ]; then
+            echo "ERROR: You must join the session before requesting control!"
+            exit 1
+        fi
+        
+        # 2. Add to queue
+        TIMESTAMP=$(date +%s)
+        echo "$TIMESTAMP:$TARGET_TTY" >> "$STATE_DIR/queue"
+        POSITION=$(wc -l < "$STATE_DIR/queue" | tr -d ' ')
+        
+        # 3. Send popup directly to the Host's screen
+        HOST_TTY=$(cat "$STATE_DIR/host_tty" 2>/dev/null)
+        if [ -n "$HOST_TTY" ]; then
+            REAL_HOST=$(echo "$HOST_TTY" | sed 's|_|/|g')
+            tmux -S "$SOCKET" send-keys -t "$REAL_HOST" "echo 'REQUEST: $USER (position $POSITION)'" Enter
+        fi
+        
+        echo "Request submitted! Position in queue: $POSITION"
+        ;;
+
+    end)
+        SESSION="$2"
+        if [ -z "$SESSION" ]; then
+            echo "ERROR: Please specify session name"
+            echo "Example: cis end demo"
+            exit 1
+        fi
+        
+        STATE_DIR="$HOME/cis/trace/sessions/$SESSION"
+        SOCKET="$STATE_DIR/tmux.sock"
+        
+        echo "Ending session: $SESSION"
+        tmux -S "$SOCKET" kill-session -t "$SESSION" 2>/dev/null
+        rm -rf "$STATE_DIR"
+        echo "Session ended and cleaned up"
+        ;;
+
+    help|--help|-h)
+        show_usage
+        ;;
+
+    *)
+        echo "Unknown command: $1"
+        echo "Type 'cis help' for usage"
+        ;;
+esac

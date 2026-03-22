@@ -1,0 +1,184 @@
+Collaborative Interactive Shell (CIS) - POSTMORTEM
+
+CS514 - Operating Systems  
+Instructor: Dr. Igor Crk  
+Southern Illinois University Edwardsville
+Department of Computer Science
+
+Authors:
+- Anuska Bhattarai (800832698) - anuskbh@siue.edu
+- Deepshan Adhikari (800846035) - deepadh@siue.edu
+- Sumit Shrestha (800835513) - sumishr@siue.edu
+
+This document summarizes the design decisions, technical challenges, and lessons learned while building the Collaborative Interactive Shell (CIS).
+
+1. Project Overview
+
+- Collaborative Interactive Shell (CIS) is a collaborative shell environment to allow multiple users to share a single interactive shell session at the same time.
+- The CIS system assigns one user as the Host, while everyone else joins as Observers who can request terminal control.
+- To keep things orderly, only one person (the Controller) can type commands at any given moment, while the others watch the output.
+- Rather than building a terminal handler from scratch, we used tmux to manage terminal multiplexing and pseudo-terminals (PTYs).
+- We created a lightweight collaboration layer using Bash scripts instead of modifying tmux directly.
+- Our script layer handles user roles, control requests, queue management, and failure recovery, letting tmux handle the actual terminal rendering and I/O broadcasting.
+
+
+2. Session State Management
+
+- A core design choice was to manage our session state using a file-based directory instead of embedding it within tmux.
+- Every session automatically creates a state directory under tmp/cis sessions/<session name>.
+- Inside this directory, we use simple text files to track the live state of the session:
+	a. host_tty: Logs the terminal that initiated the session.
+	b. controller: Tracks which user currently has permission to type.
+	c. queue: Keeps an ordered list of observers waiting for control.
+	d. role.*: Tracks the assigned role for each connected terminal.
+	e. user.*: Maps the terminal identifiers to actual usernames.
+
+This approach kept things transparent and made debugging much easier, as our scripts could read and update the state without messing with tmux internals.
+
+3. Challenges
+
+a. The Hardest Bug and How We Fixed It
+
+The Bug:
+- The status line consistently showed "OBSERVER" for all participants, including the host.
+- Role files were being created correctly, but the status line could not read them because of TTY format mismatch between tmux and our file naming convention.
+
+The Investigation:
+- We discovered that #{client_tty} in tmux returns /dev/ttys000 but our role files were named role._dev_ttys000.
+- The status line was trying to read /dev/ttys000 which did not exist.
+- The host was being treated like any other user because we were not checking against the host_tty file.
+- So when control returned, the host's role file said "controller" and the status line displayed that literally.
+
+The Fix:
+We implemented a two-part solution:
+- Added TTY conversion in the status line: TTY=$(echo '#{client_tty}' | sed 's|/|_|g') to match our file naming.
+- Added host detection logic that checks if current TTY matches the host_tty file, ensuring host always shows as "HOST" regardless of what the role file says.
+
+The Lesson:
+Always verify data formats between different system components and remember that some users (like host) have special status that should persist regardless of their current role.
+
+The Status Line Bug That Remains:
+- After applying the fixes and granting control to an observer and then getting control back, the host still shows as "CONTROLLER" instead of "HOST".
+- The role file correctly says "controller" but we want the display to show "HOST" to indicate special host status.
+- We attempted to fix this with host_tty detection in the status line, but the fix was incomplete and the bug persists.
+- This remains an unresolved issue.
+
+
+b. The Queue Release Bug and How We Fixed It
+
+The Bug:
+- When a controller released control, it always returned to the host, ignoring anyone waiting in the queue.
+- With three users (host A, observers B and C), when B released control, it should have gone to C, but instead went back to A with a message "Control returned to Host".
+
+The Investigation:
+The in-session-release.sh script was hardcoded to always give control back to the host. It never checked if there were people waiting in the queue.
+
+The Fix:
+We redesigned the release logic to:
+- First check if anyone is waiting in queue
+- If yes, grant control to the next person in line
+- Remove that person from queue
+- Only return to host if queue is empty
+
+The Result:
+- B releases control → control goes to C (next in queue)
+- C releases control → queue empty → control returns to host A
+
+
+4. One Thing We Would Redesign
+
+- If we were to rebuild CIS from scratch, we would implement a client-server architecture instead of relying on shared files.
+- The current design requires all participants to have access to the same filesystem.
+- It works well for SSH-based access but becomes problematic for users on different networks without shared storage.
+- Key limitations include:
+    - Cannot work across the internet without shared drive
+    - TTY-based identification breaks on different machines
+    - File permission issues on multi-user systems
+
+What We Would Build Instead:
+- Central server written in Go or Python
+- WebSocket communication between clients and server
+- Web-based terminal interface using xterm.js
+- Database for storing session state
+- Username and password authentication
+- True cross-platform support without requiring SSH
+
+This would make CIS truly platform-independent and work across the internet, not just on shared networks
+
+
+5. Fairness Policy Under Contention
+
+Our Policy: FIFO (First-In, First-Out) with 30-second request expiration that only applies to the person at the front of the queue.
+
+Example Scenario:
+
+- Jon is hosting the session
+- Alice and Bob joined the session as Observer
+- Alice requests control first
+- After sometime Bob requests control
+- Queue contains: [Alice, Bob]
+- Alice has 30-second timer (front of queue)
+- Bob have no timer yet
+- Jon (Host) grants control to Alice (front of queue)
+- Alice is removed from queue
+- Bob becomes new front in the queue
+- Alice uses the terminal for a minutes, then releases control by pressing Ctrl+P 1
+- Control automatically passes to Bob (next in queue)
+- Alice is removed from queue after Alice relases control
+- Suddenly Bob's terminal crashes unexpectedly
+- Control is passed back to Jon (Host)
+
+Why This is Fair:
+
+- Everyone gets control in the order they asked.
+- No one can cut in line.
+- Only front of queue has timer, preventing starvation.
+- System recovers automatically from disconnections.
+- Expired requests prevent stale entries from blocking others.
+- Host retains control at the end.
+
+Edge Cases Handled:
+
+- If Controller disconnect then the next in queue gets control automatically.
+- If Host is disconnected then the entire session terminates by design.
+- Kicked users are removed from queue and session immediately.
+- Reconnecting users go to back of queue, not front.
+- Release always passes to next in queue, not back to host.
+
+
+6. What Worked Well
+- tmux as foundation: Saved enormous time by handling PTYs, window management, and multi-client output without reinventing terminal handling.
+- File-based state: Made debugging easy because we could literally see what was happening by looking at the files.
+- TTY-based identification: Simpler than network-based approaches for local testing and debugging.
+- Observer menu: Clean solution for managing disconnected observers with retry options.
+- Modular scripts: Each function in its own file made testing and fixing easier.
+
+
+7. What Did Not Work Well
+
+- TTY format mismatch: We spent hours of debugging due to subtle differences between tmux output and file naming.
+- File permissions: Constant issues with observers writing to host's directories across server.
+- Multi-laptop setup: Requires SSH or shared filesystem which is not ideal for real-world use.
+- Status line complexity: Bash commands inside tmux inside bash was extremely hard to debug.
+
+
+8. Lessons Learned
+
+- Test on target platform early: TTY behavior differs between macOS and Linux.
+- Log everything: Debug logs saved us multiple times when tracking down bugs.
+- Keep it simple: Complex one-liners are hard to debug and even harder to modify later.
+- Plan for multi-user early: Permissions and file sharing needs early planning.
+- Document as you go: Comments helped us remember what we did and why we did.
+
+
+9. Conclusion
+
+- CIS successfully demonstrates a collaborative shell environment with proper floor control.
+- It implements FIFO queue management with fair 30-second timers that only apply to the front of the queue.
+- The system handles disconnections gracefully, automatically passing control to the next in line.
+- The project reinforced core OS concepts including process management and inter-process communication.
+- We gained practical experience with file systems, permissions, and concurrency control.
+- While not production-ready for internet-scale deployment, it serves as an excellent learning tool.
+- The system illustrates the complexities of shared terminal environments in a very noticeable way.
+- We learned the importance of thorough debugging and planning for edge cases.
+- Building CIS increased our understanding of how multi-user systems coordinate access to shared resources.

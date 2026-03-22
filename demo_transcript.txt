@@ -1,0 +1,142 @@
+1. Session Hosting and Joining:
+
+
+In Host terminal (or in first terminal):
+[deepadh@os ~]$ cd cis/bin
+[deepadh@os bin]$ ./cis host server-test
+	
+
+╔═════════════════════════════════════════════════╗
+║         CIS SESSION STARTED                     ║
+╚═════════════════════════════════════════════════╝
+Session name: server-test
+Your role: HOST and CONTROLLER
+
+Others can join with: cis join deepadh server-test
+
+Press [Enter] to start the tmux session...
+	
+
+In Observer terminal (or in second terminal):
+[deepadh@os ~]$ cd cis/bin
+[deepadh@os bin]$ USER="Alex" ./cis join deepadh server-test
+	
+
+
+
+2. Ctrl+p w (Who action -  Lists all participants and current queue)
+
+
+In Host terminal:
+[deepadh@os bin]$ 
+	Participants: HOST:deepadh OBSERVER:Alex | Queue: empty     
+
+
+
+
+3. Ctrl+p d (Request control  - Opens observer menu to request queue position)
+
+
+In Observer terminal:
+╔═════════════════════════════════════════════════╗
+║         CIS - OBSERVER MENU                     ║
+╚═════════════════════════════════════════════════╝
+ 1) Request Control
+ 2) Return to Session (Read-Only)
+ 3) Leave Session Completely
+
+Choose an option (1-3):  1
+	
+
+[deepadh@os bin]$
+You are first in queue
+	
+
+In Host terminal:
+[deepadh@os bin]$ echo 'REQUEST: Alex (position 1)'
+REQUEST: Alex (position 1)
+	
+
+
+
+4. Ctrl+p k (Kick an Observer - Host removes user from session)
+
+
+In Host terminal:
+[deepadh@os bin]$ 
+	Kick:  Alex     
+
+
+In Observer terminal:
+You have been kicked from the session by the Host.
+[deepadh@os bin]$
+	
+
+
+
+5. Ctrl+p g (Grant Control - Host grants control to specific user) 
+
+
+In Host terminal:
+[deepadh@os bin]$ 
+	Grant to:  Alex       
+
+
+In Observer terminal:
+Also seen in host terminal as the control is now shifted to observer (who is now controller)
+[deepadh@os bin]$ echo 'You are now CONTROLLER'
+You are now CONTROLLER
+[deepadh@os bin]$ 
+	
+
+
+
+6. Ctrl+p m ( Message - Broadcast message to all participants)
+
+
+In Host terminal:
+[deepadh@os bin]$ 
+	Message:  Hello  
+
+
+
+
+In Observer terminal:
+[deepadh@os bin]$ echo '[Alex]: Hello'
+[Alex]: Hello
+[deepadh@os bin]$ 
+	
+
+
+
+7. Ctrl+p 1 (Release control  - Current controller gives up control)
+
+
+In Host terminal:
+[deepadh@os bin]$ echo 'You are now controller'
+You are now controller
+[deepadh@os bin]$ 
+	CONTROLLER
+
+
+In Observer terminal:
+[deepadh@os bin]$ echo 'You are now controller'
+You are now controller
+[deepadh@os bin]$ 
+	OBSERVER
+
+
+
+
+8. Exiting Session (Press ctrl+d or type “exit” command)
+
+
+In Host terminal:
+[exited]
+[deepadh@os bin]$ 
+	
+
+In Observer terminal:
+[deepadh@os bin]$ ./cis end server-test
+The session has been ended by the Host.
+[deepadh@os bin]$
