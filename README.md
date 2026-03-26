@@ -8,7 +8,7 @@
 ## Course
 CS514 - Operating Systems  
 Instructor: Dr. Igor Crk  
-Southern Illinois University Edwardsville
+Southern Illinois University Edwardsville  
 Department of Computer Science
 
 ## Features
